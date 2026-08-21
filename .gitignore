@@ -1,0 +1,22 @@
+# 构建产物
+build/
+*.user
+*.user.*
+.qmlcache/
+.qtcreator/
+
+# Python
+__pycache__/
+*.pyc
+
+# 本地配置（含数据库账号密码）
+config.ini
+.env
+ai_service/.env
+
+# 上传的媒体文件
+uploads/
+
+# 日志与临时文件
+*.log
+*.tmp
