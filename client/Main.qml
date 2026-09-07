@@ -447,6 +447,7 @@ FrameLessWindow {
                 model: [
                     {text: "上传视频", icon: "📹"},
                     {text: "下载", icon: "📥"},
+                    {text: "上传记录", icon: "🗂️"},
                     {text: "消息", icon: "✉️"},
                     {text: "夜间模式", icon: "🌙"},
                     {text: "设置", icon: "⚙️"}
@@ -513,6 +514,7 @@ FrameLessWindow {
                                 root.showPersonInfo = false
                                 root.currentLeftMenuItem = "下载"
                             }
+                            if (modelData.text === "上传记录") uploadRecordsPopup.open()
                             if (modelData.text === "消息") messagePopup.open()
                             if (modelData.text === "设置") {
                                 root.showPersonInfo = false
@@ -596,7 +598,40 @@ FrameLessWindow {
            videoUploadPopup.show()
            videoUploadPopup.x = (Screen.width - width) / 2
            videoUploadPopup.y = (Screen.height - height) / 2
+           // 上传页为每次打开重置"临时状态提示"（上传记录在侧栏独立页查看）
+           if (videoLoader.item && videoLoader.item.resetSessionStatus)
+               videoLoader.item.resetSessionStatus()
        }
+    }
+
+    // 上传记录弹窗（转码进度，本次运行）
+    FrameLessWindow {
+        id: uploadRecordsPopup
+        width: 940
+        height: 760
+        visible: false
+        flags: Qt.Dialog
+        title: "上传记录"
+
+        Loader {
+            id: uploadRecordsLoader
+            anchors.fill: parent
+            source: "qml/Tools_Left/UploadRecordsPage.qml"
+
+            onLoaded: {
+                if (item && item.closeRequested) {
+                    item.closeRequested.connect(function() {
+                        uploadRecordsPopup.close()
+                    })
+                }
+            }
+        }
+
+        function open() {
+            uploadRecordsPopup.show()
+            uploadRecordsPopup.x = (Screen.width - width) / 2
+            uploadRecordsPopup.y = (Screen.height - height) / 2
+        }
     }
 
     // 消息弹窗

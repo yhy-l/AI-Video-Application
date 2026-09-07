@@ -30,6 +30,11 @@ bool BilibiliServer::start(quint16 port, const AppConfig &cfg)
     if (m_cfg.uploadsDir.isEmpty())
         m_cfg.uploadsDir = QCoreApplication::applicationDirPath() + "/uploads";
     QDir().mkpath(m_cfg.uploadsDir);
+    QDir().mkpath(m_cfg.uploadsDir + "/tmp");
+
+    // 转码：ffprobe 元数据/自动封面 + ffmpeg 多清晰度（后台队列，不阻塞）
+    m_transcoder.configure(m_cfg.uploadsDir, m_cfg.ffmpegPath, m_cfg.ffprobePath,
+                           m_cfg.transcodeEnabled, m_cfg.transcodeWorkers);
 
     // ---- 账号 ----
     m_server.route("/api/register", QHttpServerRequest::Method::Post,
@@ -98,6 +103,8 @@ bool BilibiliServer::start(quint16 port, const AppConfig &cfg)
                    [this](const QHttpServerRequest &r) { return handleUploadVideo(r); });
     m_server.route("/api/videos/<arg>", QHttpServerRequest::Method::Get,
                    [this](const QString &id, const QHttpServerRequest &r) { return handleGetVideo(id, r); });
+    m_server.route("/api/videos/<arg>", QHttpServerRequest::Method::Delete,
+                   [this](const QString &id, const QHttpServerRequest &r) { return handleDeleteVideo(id, r); });
     m_server.route("/api/videos/<arg>/view", QHttpServerRequest::Method::Post,
                    [this](const QString &id, const QHttpServerRequest &r) { return handleView(id, r); });
     m_server.route("/api/videos/<arg>/like", QHttpServerRequest::Method::Post,
@@ -118,6 +125,8 @@ bool BilibiliServer::start(quint16 port, const AppConfig &cfg)
                    [this](const QString &id, const QHttpServerRequest &r) { return handlePostDanmaku(id, r); });
 
     // ---- 用户数据 ----
+    m_server.route("/api/me/videos", QHttpServerRequest::Method::Get,
+                   [this](const QHttpServerRequest &r) { return handleMyVideos(r); });
     m_server.route("/api/me/history", QHttpServerRequest::Method::Get,
                    [this](const QHttpServerRequest &r) { return handleHistory(r); });
     m_server.route("/api/me/history/<arg>", QHttpServerRequest::Method::Post,
@@ -135,6 +144,12 @@ bool BilibiliServer::start(quint16 port, const AppConfig &cfg)
 
     // 连接 Redis（独立库，仅用于热门排行；失败则回退 MySQL 排序）
     m_redisReady = m_redis.connectToServer(m_cfg.redisHost, m_cfg.redisPort, m_cfg.redisDb);
+    // 服务重启后：续跑上次未完成的转码任务
+    m_transcoder.enqueuePendingFromDb();
+    // 有些旧视频卡在 pending 但从未生成任务行，也重新探测入队
+    const auto pendingVideos = repo::videosNeedingTranscode();
+    for (const QString &vid : pendingVideos)
+        m_transcoder.enqueue(vid);
     if (m_redisReady) {
         m_redis.ping();
         qInfo() << "Redis ready:" << m_cfg.redisHost << m_cfg.redisPort << "db" << m_cfg.redisDb;
@@ -399,7 +414,18 @@ QHttpServerResponse BilibiliServer::handleGetVideo(const QString &id, const QHtt
     auto v = repo::findVideoById(id);
     if (!v)
         return errJson("视频不存在", QHttpServerResponse::StatusCode::NotFound);
-    return okJson(v->toJson());
+    QJsonObject data = v->toJson();
+    // 转码中的每档实时进度（供上传页轮询）
+    QJsonArray tasks;
+    for (const TranscodeTaskInfo &t : repo::transcodeTasksOf(id)) {
+        QJsonObject o;
+        o.insert("quality", t.quality);
+        o.insert("status", t.status);
+        o.insert("progress", t.progress);
+        tasks.append(o);
+    }
+    data.insert("transcodeTasks", tasks);
+    return okJson(data);
 }
 
 QHttpServerResponse BilibiliServer::handleSearch(const QHttpServerRequest &req)
@@ -662,6 +688,58 @@ QHttpServerResponse BilibiliServer::handleFavorites(const QHttpServerRequest &re
     for (const VideoRecord &v : repo::favoriteVideosOf(userId))
         arr.append(v.toJson());
     return okJson(arr);
+}
+
+// ---------- 我的投稿 ----------
+
+QHttpServerResponse BilibiliServer::handleMyVideos(const QHttpServerRequest &req)
+{
+    Q_UNUSED(req)
+    const QString userId = bearerUserId(req);
+    if (userId.isEmpty())
+        return errJson("请先登录", QHttpServerResponse::StatusCode::Unauthorized);
+    QJsonArray arr;
+    for (const VideoRecord &v : repo::videosByUser(userId))
+        arr.append(v.toJson());
+    return okJson(arr);
+}
+
+QHttpServerResponse BilibiliServer::handleDeleteVideo(const QString &id, const QHttpServerRequest &req)
+{
+    const QString userId = bearerUserId(req);
+    if (userId.isEmpty())
+        return errJson("请先登录", QHttpServerResponse::StatusCode::Unauthorized);
+    auto v = repo::findVideoById(id);
+    if (!v)
+        return errJson("视频不存在", QHttpServerResponse::StatusCode::NotFound);
+    if (v->userId != userId)
+        return errJson("只能删除自己上传的视频", QHttpServerResponse::StatusCode::Forbidden);
+
+    // 1) 删磁盘文件：原片 + 已转档位 + 封面（用纯文件名防目录穿越）
+    QStringList toDelete;
+    const QString srcName = QFileInfo(v->videoPath).fileName();
+    if (!srcName.isEmpty() && srcName != "." && srcName != "..") {
+        toDelete << uploadsPath(srcName);
+        const int dot = srcName.lastIndexOf('.');
+        const QString base = dot > 0 ? srcName.left(dot) : srcName;
+        for (int q : {480, 720, 1080})
+            toDelete << uploadsPath(base + "__" + QString::number(q) + (dot > 0 ? srcName.mid(dot) : QString()));
+    }
+    const QString coverName = QFileInfo(v->coverPath).fileName();
+    if (!coverName.isEmpty() && coverName != "." && coverName != "..")
+        toDelete << uploadsPath(coverName);
+    int removedFiles = 0;
+    for (const QString &p : toDelete) {
+        if (QFile::exists(p) && QFile::remove(p))
+            removedFiles++;
+    }
+
+    // 2) 删数据库（含评论/互动/转码任务等关联数据）
+    if (!repo::deleteVideoRecord(id))
+        return errJson("删除记录失败", QHttpServerResponse::StatusCode::InternalServerError);
+
+    qInfo() << "video deleted:" << id << "files removed:" << removedFiles;
+    return okJson(QJsonObject{{"removedFiles", removedFiles}}, "已删除");
 }
 
 // ---------- 媒体 ----------
@@ -1093,6 +1171,9 @@ QHttpServerResponse BilibiliServer::handleUploadFinalize(const QString &id, cons
 
     m_pendingUploads.remove(id);
     qInfo() << "upload finalized:" << id << title;
+
+    // 后台 ffprobe -> 自动封面 -> 多清晰度转码
+    m_transcoder.enqueue(id);
 
     auto saved = repo::findVideoById(id);
     return okJson(saved ? saved->toJson() : QJsonObject(), "上传成功");

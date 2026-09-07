@@ -7,7 +7,7 @@ Item {
     id: uploader
 
     signal uploadProgress(var bytesSent, var bytesTotal)
-    signal uploadFinished(string videoUrl, string coverUrl)
+    signal uploadFinished(string videoUrl, string coverUrl, string videoId, var videoData)
     signal uploadError(string error)
     signal uploadCancelled()
 
@@ -26,10 +26,10 @@ Item {
         function onUploadProgress(bytesSent, bytesTotal) {
             uploadProgress(bytesSent, bytesTotal)
         }
-        function onUploadFinished(videoUrl, coverUrl) {
+        function onUploadFinished(videoUrl, coverUrl, videoId, videoData) {
             isUploading = false
             currentRequest = null
-            uploadFinished(videoUrl, coverUrl)
+            uploadFinished(videoUrl, coverUrl, videoId, videoData)
         }
         function onUploadError(error) {
             isUploading = false

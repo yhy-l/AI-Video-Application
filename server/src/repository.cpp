@@ -23,6 +23,12 @@ static VideoRecord videoFromQuery(QSqlQuery &q)
     v.coinCount = q.value("coin_count").toInt();
     v.favoriteCount = q.value("favorite_count").toInt();
     v.commentCount = q.value("comment_count").toInt();
+    v.width = q.value("width").toInt();
+    v.height = q.value("height").toInt();
+    v.durationSec = q.value("duration_sec").toDouble();
+    v.fileSizeBytes = q.value("file_size_bytes").toLongLong();
+    v.transcodeStatus = q.value("transcode_status").toString();
+    v.doneQualities = q.value("done_qualities").toString();
     v.createdAt = q.value("created_at").toDateTime();
     return v;
 }
@@ -30,6 +36,8 @@ static VideoRecord videoFromQuery(QSqlQuery &q)
 static const char *kVideoSelect =
     "SELECT v.id, v.user_id, u.nickname AS author_name, v.title, v.description, "
     "v.video_path, v.cover_path, v.tags, v.view_count, v.like_count, v.coin_count, "
+    "v.width, v.height, v.duration_sec, v.file_size_bytes, "
+    "v.transcode_status, v.done_qualities, "
     "v.favorite_count, v.comment_count, v.created_at "
     "FROM videos v JOIN users u ON u.id = v.user_id ";
 
@@ -120,8 +128,8 @@ bool updateUserPassword(const QString &userId, const QString &passwordHash,
 bool insertVideo(VideoRecord &video)
 {
     QSqlQuery q(db::connection());
-    q.prepare("INSERT INTO videos (id, user_id, title, description, video_path, cover_path, tags) "
-              "VALUES (?, ?, ?, ?, ?, ?, ?)");
+    q.prepare("INSERT INTO videos (id, user_id, title, description, video_path, cover_path, tags, width, height, duration_sec, file_size_bytes, transcode_status, done_qualities) "
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     q.addBindValue(video.id);
     q.addBindValue(video.userId);
     q.addBindValue(video.title);
@@ -129,6 +137,12 @@ bool insertVideo(VideoRecord &video)
     q.addBindValue(video.videoPath);
     q.addBindValue(video.coverPath);
     q.addBindValue(video.tags);
+    q.addBindValue(video.width);
+    q.addBindValue(video.height);
+    q.addBindValue(video.durationSec);
+    q.addBindValue(video.fileSizeBytes);
+    q.addBindValue(video.transcodeStatus.isEmpty() ? QString("pending") : video.transcodeStatus);
+    q.addBindValue(video.doneQualities);
     if (!q.exec()) {
         qWarning() << "insertVideo failed:" << q.lastError().text();
         return false;
@@ -727,5 +741,199 @@ QList<VideoRecord> listVideosByViews(int limit)
     while (q.next())
         result.append(videoFromQuery(q));
     return result;
+}
+
+// ---- 视频转码元数据/任务状态 ----
+bool updateVideoMediaMeta(const QString &videoId, int width, int height, double durationSec, qint64 fileSize)
+{
+    QSqlQuery q(db::connection());
+    q.prepare("UPDATE videos SET width = ?, height = ?, duration_sec = ?, file_size_bytes = ?, transcode_status = CASE WHEN transcode_status = '' THEN 'pending' ELSE transcode_status END WHERE id = ?");
+    q.addBindValue(width);
+    q.addBindValue(height);
+    q.addBindValue(durationSec);
+    q.addBindValue(fileSize);
+    q.addBindValue(videoId);
+    return q.exec();
+}
+
+bool ensureTranscodeTask(const QString &videoId, int quality)
+{
+    QSqlQuery q(db::connection());
+    q.prepare("INSERT IGNORE INTO transcode_tasks (video_id, quality, status, progress) VALUES (?, ?, 'pending', 0)");
+    q.addBindValue(videoId);
+    q.addBindValue(quality);
+    return q.exec();
+}
+
+bool updateTranscodeTask(const QString &videoId, int quality, const QString &status, int progress)
+{
+    QSqlQuery q(db::connection());
+    q.prepare("INSERT INTO transcode_tasks (video_id, quality, status, progress) VALUES (?, ?, ?, ?) "
+              "ON DUPLICATE KEY UPDATE status = VALUES(status), progress = VALUES(progress)");
+    q.addBindValue(videoId);
+    q.addBindValue(quality);
+    q.addBindValue(status);
+    q.addBindValue(progress);
+    return q.exec();
+}
+
+QList<TranscodeTaskInfo> transcodeTasksOf(const QString &videoId)
+{
+    QList<TranscodeTaskInfo> result;
+    QSqlQuery q(db::connection());
+    q.prepare("SELECT quality, status, progress FROM transcode_tasks WHERE video_id = ? ORDER BY quality");
+    q.addBindValue(videoId);
+    if (!q.exec()) {
+        qWarning() << "transcodeTasksOf failed:" << q.lastError().text();
+        return result;
+    }
+    while (q.next()) {
+        TranscodeTaskInfo t;
+        t.quality = q.value("quality").toInt();
+        const QString st = q.value("status").toString();
+        if (st == "running") t.status = 1;
+        else if (st == "done") t.status = 2;
+        else if (st == "failed") t.status = 3;
+        else t.status = 0;
+        t.progress = q.value("progress").toInt();
+        result.append(t);
+    }
+    return result;
+}
+
+// 服务启动恢复：把上次没转完/正在转的任务重新标记为 pending
+QList<QPair<QString,int>> pendingTranscodeTasks()
+{
+    QList<QPair<QString,int>> result;
+    QSqlQuery q(db::connection());
+    q.prepare("SELECT video_id, quality FROM transcode_tasks WHERE status IN ('pending', 'running') ORDER BY id");
+    if (!q.exec()) {
+        qWarning() << "pendingTranscodeTasks failed:" << q.lastError().text();
+        return result;
+    }
+    while (q.next())
+        result.append({q.value(0).toString(), q.value(1).toInt()});
+    q.prepare("UPDATE transcode_tasks SET status = 'pending', progress = 0 WHERE status = 'running'");
+    if (!q.exec()) qWarning() << "reset running tasks failed:" << q.lastError().text();
+    return result;
+}
+
+QStringList doneQualitiesOfVideo(const QString &videoId)
+{
+    QStringList result;
+    QSqlQuery q(db::connection());
+    q.prepare("SELECT quality FROM transcode_tasks WHERE video_id = ? AND status = 'done' ORDER BY quality");
+    q.addBindValue(videoId);
+    if (!q.exec()) return result;
+    while (q.next()) result.append(q.value(0).toString());
+    return result;
+}
+
+bool setVideoTranscodeStatus(const QString &videoId, const QString &status, const QStringList &doneQualities)
+{
+    QSqlQuery q(db::connection());
+    q.prepare("UPDATE videos SET transcode_status = ?, done_qualities = ? WHERE id = ?");
+    q.addBindValue(status);
+    q.addBindValue(doneQualities.join(","));
+    q.addBindValue(videoId);
+    return q.exec();
+}
+
+// 服务启动恢复：找出尚未转码完成（pending/transcoding）的视频
+QList<QString> videosNeedingTranscode()
+{
+    QList<QString> result;
+    QSqlQuery q(db::connection());
+    q.prepare("SELECT id FROM videos WHERE transcode_status = 'pending' OR transcode_status = 'transcoding' ORDER BY created_at");
+    if (!q.exec()) {
+        qWarning() << "videosNeedingTranscode failed:" << q.lastError().text();
+        return result;
+    }
+    while (q.next())
+        result.append(q.value(0).toString());
+    return result;
+}
+
+QList<VideoRecord> videosByUser(const QString &userId)
+{
+    QList<VideoRecord> result;
+    QSqlQuery q(db::connection());
+    q.prepare(QString(kVideoSelect) + "WHERE v.user_id = ? ORDER BY v.created_at DESC");
+    q.addBindValue(userId);
+    if (!q.exec()) {
+        qWarning() << "videosByUser failed:" << q.lastError().text();
+        return result;
+    }
+    while (q.next())
+        result.append(videoFromQuery(q));
+    return result;
+}
+// 删除某个视频超出源分辨率/不再需要的转码任务行（如误建的 1080p 任务）
+bool removeTranscodeTask(const QString &videoId, int quality)
+{
+    QSqlQuery q(db::connection());
+    q.prepare("DELETE FROM transcode_tasks WHERE video_id = ? AND quality = ?");
+    q.addBindValue(videoId);
+    q.addBindValue(quality);
+    return q.exec();
+}
+
+// 删除视频：连同评论/点赞/收藏/投币/弹幕/转码任务等全部关联数据（调用方自行删磁盘文件）
+bool deleteVideoRecord(const QString &videoId)
+{
+    QSqlDatabase db = db::connection();
+    if (!db.transaction())
+        return false;
+
+    // 先收集评论 id（评论点赞表无级联）
+    QStringList commentIds;
+    {
+        QSqlQuery q(db);
+        q.prepare("SELECT id FROM comments WHERE video_id = ?");
+        q.addBindValue(videoId);
+        if (q.exec()) {
+            while (q.next())
+                commentIds << q.value(0).toString();
+        }
+    }
+    if (!commentIds.isEmpty()) {
+        QSqlQuery d(db);
+        QStringList ph;
+        for (int i = 0; i < commentIds.size(); ++i)
+            ph << "?";
+        d.prepare("DELETE FROM comment_likes WHERE comment_id IN (" + ph.join(",") + ")");
+        for (const QString &cid : std::as_const(commentIds))
+            d.addBindValue(cid);
+        d.exec();
+    }
+
+    const QStringList related = {
+        "DELETE FROM comments WHERE video_id = ?",
+        "DELETE FROM favorites WHERE video_id = ?",
+        "DELETE FROM video_likes WHERE video_id = ?",
+        "DELETE FROM watch_history WHERE video_id = ?",
+        "DELETE FROM video_coins WHERE video_id = ?",
+        "DELETE FROM danmaku WHERE video_id = ?",
+        "DELETE FROM transcode_tasks WHERE video_id = ?"
+    };
+    for (const QString &sql : related) {
+        QSqlQuery q(db);
+        q.prepare(sql);
+        q.addBindValue(videoId);
+        if (!q.exec()) {
+            qWarning() << "deleteVideoRecord related failed:" << q.lastError().text();
+            db.rollback();
+            return false;
+        }
+    }
+    QSqlQuery del(db);
+    del.prepare("DELETE FROM videos WHERE id = ?");
+    del.addBindValue(videoId);
+    if (!del.exec()) {
+        qWarning() << "deleteVideoRecord failed:" << del.lastError().text();
+        db.rollback();
+        return false;
+    }
+    return db.commit();
 }
 } // namespace repo

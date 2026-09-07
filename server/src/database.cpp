@@ -41,6 +41,12 @@ bool createTables(QString *errOut)
             coin_count INT DEFAULT 0,
             favorite_count INT DEFAULT 0,
             comment_count INT DEFAULT 0,
+            width INT DEFAULT 0,
+            height INT DEFAULT 0,
+            duration_sec DOUBLE DEFAULT 0,
+            file_size_bytes BIGINT DEFAULT 0,
+            transcode_status VARCHAR(16) DEFAULT '',
+            done_qualities VARCHAR(64) DEFAULT '',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             KEY idx_videos_user (user_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4)",
@@ -126,7 +132,17 @@ bool createTables(QString *errOut)
             content TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             KEY idx_chat_pair (from_user, to_user)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4)"
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4)",
+        // 视频转码任务（每档位一条；上传完成后由后台 ffmpeg 队列处理）
+        R"(CREATE TABLE IF NOT EXISTS transcode_tasks (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            video_id VARCHAR(64) NOT NULL,
+            quality INT NOT NULL,
+            status VARCHAR(16) DEFAULT 'pending',
+            progress INT DEFAULT 0,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_video_quality (video_id, quality)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4)",
     };
 
     for (const QString &sql : statements) {
@@ -138,6 +154,30 @@ bool createTables(QString *errOut)
         }
     }
     qInfo() << "Database tables ready";
+    // 旧库补列（幂等，新库建表已含这些列，contains 会跳过）
+    const QList<QPair<QString, QString>> videoColumns = {
+        {"width", "INT DEFAULT 0"},
+        {"height", "INT DEFAULT 0"},
+        {"duration_sec", "DOUBLE DEFAULT 0"},
+        {"file_size_bytes", "BIGINT DEFAULT 0"},
+        {"transcode_status", "VARCHAR(16) DEFAULT ''"},
+        {"done_qualities", "VARCHAR(64) DEFAULT ''"}
+    };
+    for (const auto &c : videoColumns) {
+        QSqlQuery check(s_db);
+        check.prepare("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'videos' AND COLUMN_NAME = ?");
+        check.addBindValue(c.first);
+        if (check.exec() && check.next() && check.value(0).toInt() == 0) {
+            QSqlQuery alter(s_db);
+            const QString sql = QString("ALTER TABLE videos ADD COLUMN %1 %2").arg(c.first, c.second);
+            if (!alter.exec(sql)) {
+                if (errOut) *errOut = alter.lastError().text();
+                qCritical() << "migrate videos failed:" << alter.lastError().text();
+                return false;
+            }
+            qInfo() << "migrated videos." << c.first;
+        }
+    }
     return true;
 }
 

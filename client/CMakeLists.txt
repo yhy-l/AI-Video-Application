@@ -42,6 +42,7 @@ qt_add_qml_module(appBilibili
         qml/Tools_Left/PersonInfo.qml
         qml/Tools_Left/Message_Page.qml
         qml/Tools_Left/DownloadPage.qml
+        qml/Tools_Left/UploadRecordsPage.qml
         qml/AI_Pet/PetWindow.qml
         qml/Settings/SettingsPage.qml
         qml/Send_Videos/VideoLode.qml

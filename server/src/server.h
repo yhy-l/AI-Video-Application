@@ -7,6 +7,7 @@
 #include "auth.h"
 #include "redis_client.h"
 #include "models.h"
+#include "transcode_manager.h"
 
 // multipart/form-data 中的一个字段
 struct MultipartPart {
@@ -41,6 +42,8 @@ private:
     QHttpServerResponse handleHistory(const QHttpServerRequest &req);
     QHttpServerResponse handleAddHistory(const QString &id, const QHttpServerRequest &req);
     QHttpServerResponse handleFavorites(const QHttpServerRequest &req);
+    QHttpServerResponse handleMyVideos(const QHttpServerRequest &req);
+    QHttpServerResponse handleDeleteVideo(const QString &id, const QHttpServerRequest &req);
     QHttpServerResponse handleMedia(const QString &fileName, const QHttpServerRequest &req);
     QHttpServerResponse handleSeed(const QHttpServerRequest &req);
     QHttpServerResponse handleCreateVideoMeta(const QHttpServerRequest &req);
@@ -90,5 +93,6 @@ private:
 
     QHttpServer m_server;
     AppConfig m_cfg;
+    TranscodeManager m_transcoder;
     TokenStore m_tokens;
 };

@@ -84,6 +84,8 @@ FrameLessWindow{
     property var videoManager       //视频控制器
     property var videoId            //视频id
     property var index             //视频索引
+    property string currentQualityUrl: ""   // 当前播放的媒体地址（默认原画）
+    property string currentQualityName: "原画"
 
     Connections
     {
@@ -123,15 +125,91 @@ FrameLessWindow{
         }
     }
 
+    // 打开视频后拉取最新转码状态；转码完成后 qualities 变多，清晰度菜单自动出现
+    Connections
+    {
+        target: videoManager
+
+        function onVideoStatusReady(videoId, video) {
+            if (videoId !== videoPlayerPage.videoId || !video || !video.id)
+                return
+            var merged = JSON.parse(JSON.stringify(videoPlayerPage.videoData || {}))
+            merged.qualities = video.qualities || merged.qualities || []
+            merged.transcodeStatus = video.transcodeStatus || merged.transcodeStatus || ""
+            merged.width = video.width || merged.width
+            merged.height = video.height || merged.height
+            merged.durationSec = video.durationSec || merged.durationSec
+            videoPlayerPage.videoData = merged
+            if (!currentQualityUrl) {
+                currentQualityUrl = merged.videoUrl || ""
+                currentQualityName = "原画"
+            }
+        }
+    }
+
+    Timer {
+        id: qualityPollTimer
+        interval: 3000
+        repeat: true
+        running: false
+        onTriggered: {
+            // 转码未结束前持续拉取，结束后立即停止
+            if (videoPlayerPage.videoData.transcodeStatus
+                    && videoPlayerPage.videoData.transcodeStatus !== "done"
+                    && videoManager)
+                videoManager.fetchVideoStatus(videoPlayerPage.videoId)
+            else
+                running = false
+        }
+    }
+
     function updateVideoData() {
             if (videoManager && videoId) {
                 var data = videoManager.getVideo(videoId)
                 // getVideo 只在已加载列表里找；搜索结果可能不在其中，
                 // 未命中时保留传入的数据
-                if (data && data.id)
+                if (data && data.id) {
                     videoData = JSON.parse(JSON.stringify(data))
+                    // 数据更新后重置为"原画"（保持与现有播放一致）
+                    if (currentQualityUrl === "" || !currentQualityUrl) {
+                        currentQualityUrl = videoData.videoUrl || ""
+                        currentQualityName = "原画"
+                    }
+                }
             }
         }
+
+    // 切换清晰度：保持播放位置与播放状态
+    function switchQuality(url) {
+        if (!url || url === currentQualityUrl || url === mediaPlayer.source)
+            return
+        var pos = mediaPlayer.position
+        var wasPlaying = mediaPlayer.playbackState === MediaPlayer.PlayingState
+        currentQualityUrl = url
+        mediaPlayer.source = url
+        if (wasPlaying) {
+            mediaPlayer.play()
+        }
+        // 新源就绪后恢复上次进度
+        qualityRestorePosition = pos
+        qualityRestoreTimer.restart()
+        showVideoToast("已切换清晰度")
+    }
+
+    property int qualityRestorePosition: -1
+
+    Timer {
+        id: qualityRestoreTimer
+        interval: 350
+        repeat: false
+        onTriggered: {
+            if (qualityRestorePosition >= 0 && mediaPlayer.duration > 0) {
+                var p = Math.min(qualityRestorePosition, mediaPlayer.duration)
+                mediaPlayer.position = p
+                qualityRestorePosition = -1
+            }
+        }
+    }
 
     flags: {
             var baseFlags = Qt.Window | Qt.FramelessWindowHint;
@@ -143,13 +221,18 @@ FrameLessWindow{
         }//用于固定窗口
 
     Component.onCompleted: {
-        mediaPlayer.play()
+        // 默认播放原画；若存在转码档位，按钮文本随所选更新
         updateVideoData()
+        currentQualityUrl = videoData.videoUrl || ""
+        currentQualityName = "原画"
+        mediaPlayer.play()
         refreshActionStates()
         mainWindow.currentVideoPlayer = this
         if (videoManager && videoId) {
             videoManager.loadDanmaku(videoId)
             videoManager.recordView(videoId)   // 打开即上报播放量（服务端防刷）
+            videoManager.fetchVideoStatus(videoId)   // 拉最新转码状态/清晰度
+            qualityPollTimer.running = true          // 未转完前每 3 秒刷新
         }
     }
 
@@ -474,7 +557,7 @@ FrameLessWindow{
                     // 媒体播放器
                     MediaPlayer {
                         id: mediaPlayer
-                        source: videoData.videoUrl
+                        source: currentQualityUrl !== "" ? currentQualityUrl : videoData.videoUrl
                         videoOutput: videoOutput
                         audioOutput: AudioOutput
                         {
@@ -1119,6 +1202,122 @@ FrameLessWindow{
                                            }
                                    }
 
+                               }
+
+                               // ===== 清晰度选择 =====
+                               Button {
+                                               id: qualityBtn
+                                               Layout.preferredWidth: 74
+                                               Layout.preferredHeight: 40
+                                               Layout.alignment: Qt.AlignVCenter
+                                               Layout.bottomMargin: 6
+                                               Layout.leftMargin: 12
+
+                                               visible: videoData && videoData.qualities
+                                                        && videoData.qualities.length > 1
+                                               text: currentQualityName
+                                               font.pixelSize: 13
+
+                                               HoverHandler {
+                                                   cursorShape: Qt.PointingHandCursor
+                                               }
+
+                                               background: Rectangle {
+                                                   color: "transparent"
+                                                   border.color: qualityBtn.hovered ? "#66FFFFFF" : "#33FFFFFF"
+                                                   border.width: 1
+                                                   radius: 5
+                                               }
+
+                                               contentItem: Text {
+                                                   text: qualityBtn.text
+                                                   font: qualityBtn.font
+                                                   color: "white"
+                                                   horizontalAlignment: Text.AlignHCenter
+                                                   verticalAlignment: Text.AlignVCenter
+                                               }
+
+                                               onClicked: {
+                                                   if (quality_set.opened) quality_set.close()
+                                                   else quality_set.open()
+                                               }
+                               }
+
+                               Popup {
+                                   id: quality_set
+                                   x: qualityBtn.x + qualityBtn.width/2 - width/2
+                                   y: qualityBtn.y - height - 10
+                                   width: 108
+                                   height: contentItem.implicitHeight + 20
+                                   padding: 5
+                                   closePolicy: Popup.CloseOnPressOutside | Popup.CloseOnPressOutsideParent
+
+                                   onOpened: forceControlBarVisible = true
+                                   onClosed: {
+                                       forceControlBarVisible = false
+                                       if (!videoHoverHandler.hovered)
+                                           controlBar.opacity = 0.0
+                                   }
+
+                                   enter: Transition {
+                                       NumberAnimation { property: "opacity"; from: 0.0; to: 0.9; duration: 150 }
+                                       NumberAnimation { property: "scale"; from: 0.5; to: 1.0; duration: 100 }
+                                   }
+
+                                   exit: Transition {
+                                       NumberAnimation { property: "opacity"; from: 0.9; to: 0.0; duration: 100 }
+                                       NumberAnimation { property: "scale"; from: 1.0; to: 0.5; duration: 150 }
+                                   }
+
+                                   background: Rectangle { color: "black"; radius: 5 }
+
+                                   contentItem: ColumnLayout {
+                                       spacing: 5
+
+                                       Repeater {
+                                           model: videoData && videoData.qualities ? videoData.qualities : []
+
+                                           Button {
+                                               Layout.fillWidth: true
+                                               Layout.preferredHeight: 34
+                                               enabled: !modelData.state || modelData.state === "ready"
+                                               text: (modelData.name || (modelData.quality === 0 ? "原画" : modelData.quality + "P"))
+                                                     + (modelData.state === "transcoding" || modelData.state === "pending" ? "（转码中）"
+                                                        : (modelData.state === "failed" ? "（生成失败）" : ""))
+                                               font.bold: true
+                                               font.pixelSize: 13
+
+                                               HoverHandler { cursorShape: Qt.PointingHandCursor }
+
+                                               background: Rectangle {
+                                                   color: parent.hovered ? "#3D3D40" : "transparent"
+                                                   radius: 3
+                                                   opacity: enabled ? 1.0 : 0.45
+                                               }
+
+                                               contentItem: Text {
+                                                   text: parent.text
+                                                   font: parent.font
+                                                   color: !parent.enabled ? "#888888"
+                                                         : (currentQualityUrl === (modelData.url || "") ? "#FF6699" : "white")
+                                                   horizontalAlignment: Text.AlignHCenter
+                                                   verticalAlignment: Text.AlignVCenter
+                                               }
+
+                                               onClicked: {
+                                                   var url = modelData.url || videoData.videoUrl
+                                                   if (modelData.state && modelData.state !== "ready") {
+                                                       showVideoToast("该清晰度还在转码中，请稍后再试")
+                                                       return
+                                                   }
+                                                   switchQuality(url)
+                                                   currentQualityUrl = url
+                                                   currentQualityName = parent.text
+                                                   quality_set.close()
+                                               }
+                                           }
+                                       }
+                                   }
                                }
 
                                Button {

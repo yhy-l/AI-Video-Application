@@ -16,6 +16,7 @@ qt_add_executable(bilibili_server
     src/repository.h src/repository.cpp
     src/redis_client.h src/redis_client.cpp
     src/server.h src/server.cpp
+    src/transcode_manager.h src/transcode_manager.cpp
 )
 
 target_link_libraries(bilibili_server PRIVATE

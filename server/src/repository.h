@@ -2,6 +2,7 @@
 #include "models.h"
 #include <QJsonObject>
 #include <QList>
+#include <QPair>
 #include <optional>
 
 namespace repo {
@@ -19,12 +20,25 @@ bool updateUserPassword(const QString &userId, const QString &passwordHash,
 bool insertVideo(VideoRecord &video); // video.tags 逗号分隔
 std::optional<VideoRecord> findVideoById(const QString &id);
 QList<VideoRecord> listVideos(int page, int pageSize);
+QList<VideoRecord> videosByUser(const QString &userId);   // 我的投稿
 QList<VideoRecord> listHotVideos(int page, int pageSize);
 QList<VideoRecord> listVideosByViews(int limit);
 QList<VideoRecord> videosByIds(const QStringList &ids);
 QList<VideoRecord> searchVideos(const QString &keyword);
 bool videoExists(const QString &id);
 bool incrementVideoCounter(const QString &id, const QString &column);
+bool deleteVideoRecord(const QString &videoId);   // 删除数据库记录及全部关联表（调用方负责删磁盘文件）
+
+// ---- 转码元数据/任务状态 ----
+bool updateVideoMediaMeta(const QString &videoId, int width, int height, double durationSec, qint64 fileSize);
+bool ensureTranscodeTask(const QString &videoId, int quality);
+bool updateTranscodeTask(const QString &videoId, int quality, const QString &status, int progress);
+QList<TranscodeTaskInfo> transcodeTasksOf(const QString &videoId);
+QList<QPair<QString,int>> pendingTranscodeTasks();   // 服务启动恢复
+QStringList doneQualitiesOfVideo(const QString &videoId);
+bool setVideoTranscodeStatus(const QString &videoId, const QString &status, const QStringList &doneQualities);
+QList<QString> videosNeedingTranscode();   // 启动恢复：未转码完成的视频
+bool removeTranscodeTask(const QString &videoId, int quality);   // 清理超源分辨率的孤儿任务
 
 // ---- 评论 ----
 bool insertComment(CommentRecord &comment);

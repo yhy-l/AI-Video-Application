@@ -11,7 +11,33 @@ Rectangle {
     signal logoutRequested()
 
     property bool showFollowingList: false
+    property bool showMyVideos: true
     property bool showFollowerList: false
+    property string pendingDeleteId: ""
+    property string pendingDeleteTitle: ""
+
+    Dialog {
+        id: deleteConfirmDialog
+        modal: true
+        anchors.centerIn: parent
+        title: "删除视频"
+        standardButtons: Dialog.Yes | Dialog.No
+
+        contentItem: Text {
+            text: "确定删除《" + pendingDeleteTitle + "》吗？\n原视频、各清晰度与封面都会从服务器删除，且不可恢复。"
+            font.pixelSize: 14
+            color: "#333333"
+            wrapMode: Text.Wrap
+            width: 360
+        }
+
+        onAccepted: {
+            if (pendingDeleteId)
+                videoController.deleteMyVideo(pendingDeleteId)
+            pendingDeleteId = ""
+        }
+        onRejected: pendingDeleteId = ""
+    }
 
     ListModel { id: followingListModel }
     ListModel { id: followerListModel }
@@ -47,6 +73,7 @@ Rectangle {
     function refreshAll() {
         userController.loadFollowingUsers()
         userController.loadFollowerUsers()
+        videoController.loadMyVideos()
     }
 
     function uploadUserAvatar(path) {
@@ -181,28 +208,48 @@ Rectangle {
             }
         }
 
-        // 关注 / 粉丝 入口
+        // 我的投稿 / 关注 / 粉丝 入口
         RowLayout {
             Layout.fillWidth: true
-            spacing: 16
+            spacing: 12
+
+            Button {
+                id: myVideosBtn
+                Layout.fillWidth: true
+                Layout.preferredHeight: 44
+                text: "我的投稿 (" + (videoController.myVideos ? videoController.myVideos.length : 0) + ")"
+                background: Rectangle {
+                    color: parent.hovered ? "#FFF0F3" : "#FFFFFF"
+                    radius: 10
+                    border.color: showMyVideos ? "#FB7299" : "#E3E5E7"
+                    border.width: 1
+                }
+                contentItem: Text {
+                    text: parent.text
+                    color: showMyVideos ? "#FB7299" : "#18191C"
+                    font.pixelSize: 14
+                    font.bold: showMyVideos
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                onClicked: {
+                    showMyVideos = true
+                    showFollowingList = false
+                    showFollowerList = false
+                }
+            }
 
             Button {
                 id: followingBtn
                 Layout.fillWidth: true
                 Layout.preferredHeight: 44
                 text: "我的关注 (" + followingListModel.count + ")"
-
-                HoverHandler {
-                    cursorShape: Qt.PointingHandCursor
-                }
-
                 background: Rectangle {
                     color: parent.hovered ? "#FFF0F3" : "#FFFFFF"
                     radius: 10
                     border.color: showFollowingList ? "#FB7299" : "#E3E5E7"
                     border.width: 1
                 }
-
                 contentItem: Text {
                     text: parent.text
                     color: showFollowingList ? "#FB7299" : "#18191C"
@@ -211,9 +258,9 @@ Rectangle {
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
-
                 onClicked: {
-                    showFollowingList = !showFollowingList
+                    showMyVideos = false
+                    showFollowingList = true
                     showFollowerList = false
                 }
             }
@@ -223,18 +270,12 @@ Rectangle {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 44
                 text: "我的粉丝 (" + followerListModel.count + ")"
-
-                HoverHandler {
-                    cursorShape: Qt.PointingHandCursor
-                }
-
                 background: Rectangle {
                     color: parent.hovered ? "#FFF0F3" : "#FFFFFF"
                     radius: 10
                     border.color: showFollowerList ? "#FB7299" : "#E3E5E7"
                     border.width: 1
                 }
-
                 contentItem: Text {
                     text: parent.text
                     color: showFollowerList ? "#FB7299" : "#18191C"
@@ -243,14 +284,152 @@ Rectangle {
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
-
                 onClicked: {
-                    showFollowerList = !showFollowerList
+                    showMyVideos = false
                     showFollowingList = false
+                    showFollowerList = true
                 }
             }
         }
 
+        // 我的投稿列表
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            visible: showMyVideos
+            color: "#FFFFFF"
+            radius: 12
+            clip: true
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 16
+                spacing: 10
+
+                Text {
+                    text: "我上传的视频（删除后原文件与各清晰度一并移除）"
+                    font.pixelSize: 13
+                    font.bold: true
+                    color: "#61666D"
+                }
+
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                    ColumnLayout {
+                        width: parent.width
+                        spacing: 8
+
+                        Repeater {
+                            model: videoController.myVideos
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 104
+                                radius: 10
+                                color: "#FAFBFC"
+                                border.color: "#EAECEE"
+                                border.width: 1
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.margins: 10
+                                    spacing: 12
+
+                                    Rectangle {
+                                        Layout.preferredWidth: 132
+                                        Layout.preferredHeight: 80
+                                        radius: 6
+                                        clip: true
+                                        color: "#121212"
+
+                                        Image {
+                                            id: myVideoCover
+                                            anchors.fill: parent
+                                            source: modelData.coverUrl || ""
+                                            fillMode: Image.PreserveAspectCrop
+                                            visible: status === Image.Ready
+                                        }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "🎬"
+                                            font.pixelSize: 24
+                                            visible: myVideoCover.status !== Image.Ready
+                                        }
+                                    }
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 5
+
+                                        Text {
+                                            text: modelData.title || "无标题"
+                                            font.pixelSize: 14
+                                            font.bold: true
+                                            color: "#18191C"
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+
+                                        Text {
+                                            text: (modelData.formattedViewCount || "0") + " 播放 · 上传于 " + (modelData.uploadDate || "")
+                                            font.pixelSize: 12
+                                            color: "#9499A0"
+                                        }
+
+                                        Text {
+                                            text: modelData.transcodeStatus === "done"
+                                                  ? "转码完成 ✅"
+                                                  : (modelData.transcodeStatus === "transcoding" ? "后台转码中…" : "等待转码…")
+                                            font.pixelSize: 11
+                                            color: modelData.transcodeStatus === "done" ? "#1B8A5A" : "#FB7299"
+                                        }
+                                    }
+
+                                    Button {
+                                        text: "删除"
+                                        Layout.preferredHeight: 32
+                                        flat: true
+                                        background: Rectangle {
+                                            color: parent.hovered ? "#FDEBEB" : "#F6F7F8"
+                                            radius: 8
+                                            border.color: "#E3E5E7"
+                                            border.width: 1
+                                        }
+                                        contentItem: Text {
+                                            text: "删除"
+                                            font.pixelSize: 12
+                                            color: parent.parent.hovered ? "#D33A3A" : "#61666D"
+                                            horizontalAlignment: Text.AlignHCenter
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                        onClicked: {
+                                            pendingDeleteId = modelData.id
+                                            pendingDeleteTitle = modelData.title || "该视频"
+                                            deleteConfirmDialog.open()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: !videoController.myVideos || videoController.myVideos.length === 0
+                            text: "还没有上传过视频\n点左侧“上传视频”发布第一个作品"
+                            font.pixelSize: 14
+                            color: "#C9CCD0"
+                            horizontalAlignment: Text.AlignHCenter
+                            Layout.fillWidth: true
+                            Layout.topMargin: 60
+                        }
+                    }
+                }
+            }
+        }
         // 关注列表
         Rectangle {
             Layout.fillWidth: true

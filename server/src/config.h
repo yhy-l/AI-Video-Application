@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <QString>
 
 struct AppConfig {
@@ -12,6 +12,10 @@ struct AppConfig {
     quint16 redisPort = 6379;
     int redisDb = 15; // 使用独立数据库，避免影响其它项目（勿用 0）
     QString uploadsDir; // 为空时使用 exe 所在目录下的 uploads
+    QString ffmpegPath = "D:/PYcharm/ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe";
+    QString ffprobePath = "D:/PYcharm/ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe";
+    int transcodeWorkers = 2;   // 同时转码任务数
+    bool transcodeEnabled = true;
 
     bool loadFromFile(const QString &iniPath);
 };

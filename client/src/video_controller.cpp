@@ -121,6 +121,100 @@ void VideoController::searchVideos(const QString &keyword)
     });
 }
 
+void VideoController::fetchVideoStatus(const QString &videoId)
+{
+    m_api->getJson("/api/videos/" + videoId,
+                   [this, videoId](bool ok, const QJsonObject &obj) {
+        QVariantMap empty;
+        if (!ok || obj.value("code").toInt() != 0) {
+            emit videoStatusReady(videoId, empty);
+            return;
+        }
+        const QVariantMap video = resolveVideoMedia(obj.value("data").toObject().toVariantMap());
+        // 同步到上传任务列表（侧栏"上传记录"展示转码进度）
+        for (auto &t : m_uploadTasks) {
+            QVariantMap m = t.toMap();
+            if (m.value("id").toString() == videoId) {
+                const QString st = video.value("transcodeStatus").toString();
+                m.insert("transcodeStatus", st);
+                m.insert("width", video.value("width").toInt());
+                m.insert("height", video.value("height").toInt());
+                m.insert("qualities", video.value("qualities"));
+                m.insert("tasks", video.value("transcodeTasks"));
+                if (st == "done")
+                    m.insert("statusText", "转码完成");
+                else if (st == "transcoding")
+                    m.insert("statusText", "后台转码中…");
+                else
+                    m.insert("statusText", "等待转码…");
+                t = m;
+                emit uploadTasksChanged();
+                break;
+            }
+        }
+        emit videoStatusReady(videoId, video);
+    });
+}
+
+void VideoController::loadMyVideos()
+{
+    m_api->getJson("/api/me/videos", [this](bool ok, const QJsonObject &obj) {
+        if (!ok || obj.value("code").toInt() != 0) {
+            emit errorOccurred(obj.value("message").toString("加载我的投稿失败"));
+            return;
+        }
+        m_myVideos = obj.value("data").toArray().toVariantList();
+        resolveMediaUrls(m_myVideos);
+        emit myVideosChanged();
+    });
+}
+
+void VideoController::deleteMyVideo(const QString &videoId)
+{
+    m_api->deleteJson("/api/videos/" + videoId, [this, videoId](bool ok, const QJsonObject &obj) {
+        if (!ok || obj.value("code").toInt() != 0) {
+            emit errorOccurred(obj.value("message").toString("删除失败"));
+            return;
+        }
+        // 同时从我的投稿与首页列表移除
+        for (auto it = m_myVideos.begin(); it != m_myVideos.end(); ++it) {
+            if (it->toMap().value("id").toString() == videoId) {
+                m_myVideos.erase(it);
+                break;
+            }
+        }
+        for (auto it = m_videos.begin(); it != m_videos.end(); ++it) {
+            if (it->toMap().value("id").toString() == videoId) {
+                m_videos.erase(it);
+                break;
+            }
+        }
+        emit myVideosChanged();
+        emit videosChanged();
+    });
+}
+
+void VideoController::clearUploadTasks()
+{
+    m_uploadTasks.clear();
+    emit uploadTasksChanged();
+}
+
+// 上传失败（初始化/分片/读取等路径）时把当前任务标为失败
+void VideoController::markCurrentUploadFailed(const QString &reason)
+{
+    for (auto &t : m_uploadTasks) {
+        QVariantMap m = t.toMap();
+        if (m.value("key").toString() == m_uploadFileName) {
+            m.insert("stage", "failed");
+            m.insert("statusText", "上传失败：" + reason);
+            t = m;
+            break;
+        }
+    }
+    emit uploadTasksChanged();
+}
+
 void VideoController::loadComments(const QString &videoId)
 {
     setLoading(true);
@@ -242,6 +336,24 @@ void VideoController::uploadVideo(const QString &videoPath, const QString &cover
     m_uploadTotal = totalSize;
     m_uploadCancelled = false;
     m_uploadRetries = 0;
+    m_uploadFileName = vf.fileName();
+
+    // 在任务列表顶部插入一条"上传中"记录（供上传页/侧栏上传记录展示）
+    QVariantMap task;
+    task.insert("key", m_uploadFileName);
+    task.insert("id", QString());
+    task.insert("title", m_uploadTitle);
+    task.insert("fileName", m_uploadFileName);
+    task.insert("stage", "uploading");          // uploading / uploaded / failed
+    task.insert("transcodeStatus", QString());
+    task.insert("statusText", "上传中…");
+    task.insert("progress", 0);
+    task.insert("width", 0);
+    task.insert("height", 0);
+    task.insert("qualities", QVariantList());   // 可用清晰度（后端）
+    task.insert("tasks", QVariantList());       // 每档转码进度
+    m_uploadTasks.prepend(task);
+    emit uploadTasksChanged();
 
     m_uploadFile.setFileName(localVideo);
     if (!m_uploadFile.open(QIODevice::ReadOnly)) {
@@ -252,6 +364,7 @@ void VideoController::uploadVideo(const QString &videoPath, const QString &cover
     QJsonObject init{{"fileName", vf.fileName()}, {"fileSize", totalSize}, {"tags", tags}};
     m_api->postJson("/api/uploads/init", init, [this](bool ok, const QJsonObject &obj) {
         if (!ok || obj.value("code").toInt() != 0) {
+            markCurrentUploadFailed(obj.value("message").toString("初始化上传失败"));
             cleanupUpload();
             emit uploadError(obj.value("message").toString("初始化上传失败"));
             return;
@@ -278,6 +391,7 @@ void VideoController::sendNextChunk(qint64 sent)
     const QByteArray data = m_uploadFile.read(CHUNK);
     const qint64 chunkSize = data.size();
     if (chunkSize <= 0) {
+        markCurrentUploadFailed("读取文件失败");
         cleanupUpload();
         emit uploadError("读取文件失败");
         return;
@@ -297,11 +411,25 @@ void VideoController::sendNextChunk(qint64 sent)
                     resumeUpload(sent);
                     return;
                 }
+                markCurrentUploadFailed(obj.value("message").toString("分片上传失败"));
                 cleanupUpload();
                 emit uploadError(obj.value("message").toString("分片上传失败"));
                 return;
             }
             emit uploadProgress(sent + chunkSize, m_uploadTotal);
+            {
+                // 更新任务列表里的上传进度
+                for (auto &t : m_uploadTasks) {
+                    QVariantMap m = t.toMap();
+                    if (m.value("key").toString() == m_uploadFileName) {
+                        m.insert("progress", int(double(sent + chunkSize) * 100.0 / double(m_uploadTotal)));
+                        m.insert("statusText", QString("上传中 %1%").arg(int(double(sent + chunkSize) * 100.0 / double(m_uploadTotal))));
+                        t = m;
+                        break;
+                    }
+                }
+                emit uploadTasksChanged();
+            }
             sendNextChunk(sent + chunkSize);
         });
 }
@@ -331,9 +459,34 @@ void VideoController::finalizeUpload()
             m_uploadId.clear();
             if (ok && obj.value("code").toInt() == 0) {
                 const QJsonObject data = obj.value("data").toObject();
-                emit uploadFinished(m_api->absoluteUrl(data.value("videoUrl").toString()),
-                                   m_api->absoluteUrl(data.value("coverUrl").toString()));
+                const QVariantMap resolved = resolveVideoMedia(data.toVariantMap());
+                // 上传成功：任务进入"转码中/等待探测"阶段，并立即拉一次最新状态
+                const QString vid = resolved.value("id").toString();
+                for (auto &t : m_uploadTasks) {
+                    QVariantMap m = t.toMap();
+                    if (m.value("key").toString() == m_uploadFileName) {
+                        m.insert("id", vid);
+                        m.insert("stage", "uploaded");
+                        m.insert("transcodeStatus", resolved.value("transcodeStatus").toString());
+                        m.insert("statusText", "上传成功，等待后台转码…");
+                        m.insert("progress", 100);
+                        m.insert("width", resolved.value("width").toInt());
+                        m.insert("height", resolved.value("height").toInt());
+                        m.insert("coverUrl", resolved.value("coverUrl").toString());
+                        m.insert("videoUrl", resolved.value("videoUrl").toString());
+                        t = m;
+                        break;
+                    }
+                }
+                emit uploadTasksChanged();
+                if (!vid.isEmpty())
+                    fetchVideoStatus(vid);
+                emit uploadFinished(resolved.value("videoUrl").toString(),
+                                   resolved.value("coverUrl").toString(),
+                                   vid,
+                                   resolved);
             } else {
+                markCurrentUploadFailed(obj.value("message").toString("上传完成处理失败"));
                 emit uploadError(obj.value("message").toString("上传完成处理失败"));
             }
         });
@@ -346,6 +499,16 @@ void VideoController::cancelUpload()
         m_uploadReply->abort();
     } else if (m_uploadFile.isOpen() || !m_uploadId.isEmpty()) {
         m_uploadCancelled = true;
+        for (auto &t : m_uploadTasks) {
+            QVariantMap m = t.toMap();
+            if (m.value("key").toString() == m_uploadFileName) {
+                m.insert("stage", "cancelled");
+                m.insert("statusText", "上传已取消");
+                t = m;
+                break;
+            }
+        }
+        emit uploadTasksChanged();
         cleanupUpload();
         emit uploadCancelled();
     }
@@ -368,11 +531,24 @@ void VideoController::cleanupUpload()
 void VideoController::resolveMediaUrls(QVariantList &list)
 {
     for (auto &v : list) {
-        QVariantMap m = v.toMap();
-        m["videoUrl"] = m_api->absoluteUrl(m.value("videoUrl").toString());
-        m["coverUrl"] = m_api->absoluteUrl(m.value("coverUrl").toString());
-        v = m;
+        v = resolveVideoMedia(v.toMap());
     }
+}
+
+QVariantMap VideoController::resolveVideoMedia(const QVariantMap &m)
+{
+    QVariantMap out = m;
+    out["videoUrl"] = m_api->absoluteUrl(out.value("videoUrl").toString());
+    out["coverUrl"] = m_api->absoluteUrl(out.value("coverUrl").toString());
+    // 清晰度列表里的每个 url 同样是 /media/xxx，转成完整地址
+    QVariantList quals = out.value("qualities").toList();
+    for (auto &q : quals) {
+        QVariantMap qm = q.toMap();
+        qm["url"] = m_api->absoluteUrl(qm.value("url").toString());
+        q = qm;
+    }
+    out["qualities"] = quals;
+    return out;
 }
 void VideoController::resumeUpload(qint64 expectedSent)
 {
@@ -428,9 +604,7 @@ void VideoController::recordView(const QString &videoId)
             return;
         }
         // 服务端返回最新视频数据，同步到已加载列表，让播放数即时 +1
-        QVariantMap updated = obj.value("data").toObject().toVariantMap();
-        updated["videoUrl"] = m_api->absoluteUrl(updated.value("videoUrl").toString());
-        updated["coverUrl"] = m_api->absoluteUrl(updated.value("coverUrl").toString());
+        QVariantMap updated = resolveVideoMedia(obj.value("data").toObject().toVariantMap());
         for (auto &v : m_videos) {
             QVariantMap m = v.toMap();
             if (m.value("id").toString() == videoId) {

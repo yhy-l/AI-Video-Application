@@ -1,4 +1,4 @@
-[db]
+﻿[db]
 host=127.0.0.1
 port=3306
 name=bilibili
@@ -8,7 +8,15 @@ password=your_mysql_password
 [server]
 port=3000
 uploads_dir=
+
 [redis]
 host=127.0.0.1
 port=6379
 db=15
+
+[ffmpeg]
+# 视频上传后转 480p/720p/1080p（不高于原分辨率）+ 自动抽帧封面
+path=D:/PYcharm/ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe
+ffprobe_path=D:/PYcharm/ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe
+workers=2
+enabled=true

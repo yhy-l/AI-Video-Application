@@ -23,7 +23,7 @@ Item {
     signal uploadCancelled()
     signal fileSelected(string filePath)
     signal coverSelected(string coverPath)
-    signal uploadFinished(string videoUrl, string coverUrl)
+    signal uploadFinished(string videoUrl, string coverUrl, string videoId, var videoData)
     signal uploadError(string error)
 
     // 选择的文件路径
@@ -52,35 +52,35 @@ Item {
             progressText.text = "上传进度: " + percent + "%"
         }
 
-        onUploadFinished: function(videoUrl, coverUrl) {
-            progressText.text = "上传完成!"
-            statusText.text = "视频URL: " + videoUrl + "\n封面URL: " + coverUrl
-            uploadButton.enabled = true
-            progressBar.visible = false
-            cancelButton.visible = false
-            statusLog.text += "上传完成! 视频URL: " + videoUrl + "\n"
-            videoLode.uploadFinished(videoUrl, coverUrl)
+        onUploadFinished: function(videoUrl, coverUrl, videoId, videoData) {
+            // 顶部临时状态：上传成功（转码在侧栏"上传记录"里查看）
+            statusFeed.append({
+                ok: true,
+                text: "「" + getFileName(selectedVideoPath) + "」上传成功，已进入后台转码"
+            })
+            videoLode.uploadFinished(videoUrl, coverUrl, videoId, videoData)
             resetForm()
         }
 
         onUploadError: function(error) {
-            progressText.text = "上传错误"
-            statusText.text = "错误: " + error
-            uploadButton.enabled = true
-            progressBar.visible = false
-            cancelButton.visible = false
-            statusLog.text += "上传错误: " + error + "\n"
+            statusFeed.append({
+                ok: false,
+                text: selectedVideoPath ? "「" + getFileName(selectedVideoPath) + "」上传失败：" + error
+                                        : "上传失败：" + error
+            })
             videoLode.uploadError(error)
         }
 
         onUploadCancelled: {
-            progressText.text = "上传已取消"
-            statusText.text = ""
-            uploadButton.enabled = true
-            progressBar.visible = false
-            cancelButton.visible = false
-            statusLog.text += "上传已取消\n"
+            statusFeed.append({ok: false, text: "已取消上传"})
         }
+    }
+
+    // 本次会话的上传结果提示（成功/失败），关闭窗口即清空
+    ListModel { id: statusFeed }
+
+    function resetSessionStatus() {
+        statusFeed.clear()
     }
 
     // 背景
@@ -105,6 +105,42 @@ Item {
             width: scrollView.width - 20
             anchors.margins: 20
             spacing: 14
+
+            // 本次上传结果（临时，成功/失败提示）
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: statusFeed.count > 0 ? 30 + Math.min(statusFeed.count, 4) * 24 : 0
+                visible: statusFeed.count > 0
+                radius: 8
+                color: "#FFF8F8"
+                border.color: "#FFE0E0"
+                border.width: 1
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 4
+
+                    Text {
+                        text: "本次上传状态"
+                        font.pixelSize: 12
+                        font.bold: true
+                        color: "#61666D"
+                    }
+
+                    Repeater {
+                        model: statusFeed
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: (model.ok ? "✅ " : "❌ ") + model.text
+                            font.pixelSize: 12
+                            color: model.ok ? "#1B8A5A" : "#D33A3A"
+                            wrapMode: Text.Wrap
+                        }
+                    }
+                }
+            }
 
             // 页头
             RowLayout {
@@ -717,6 +753,7 @@ Item {
                 }
             }
 
+
             Item {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 12
@@ -867,4 +904,5 @@ Item {
         statusText.visible = true
         statusText.text = message
     }
+
 }

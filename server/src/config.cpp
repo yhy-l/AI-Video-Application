@@ -1,4 +1,4 @@
-#include "config.h"
+﻿#include "config.h"
 #include <QSettings>
 #include <QFile>
 #include <QCoreApplication>
@@ -20,5 +20,9 @@ bool AppConfig::loadFromFile(const QString &iniPath)
     redisPort = s.value("redis/port", redisPort).toUInt();
     redisDb = s.value("redis/db", redisDb).toInt();
     uploadsDir = s.value("server/uploads_dir", uploadsDir).toString();
+    ffmpegPath = s.value("ffmpeg/path", ffmpegPath).toString();
+    ffprobePath = s.value("ffmpeg/ffprobe_path", ffprobePath).toString();
+    transcodeWorkers = s.value("ffmpeg/workers", transcodeWorkers).toInt();
+    transcodeEnabled = s.value("ffmpeg/enabled", transcodeEnabled).toBool();
     return true;
 }
